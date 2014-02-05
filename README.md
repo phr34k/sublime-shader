@@ -4,5 +4,6 @@ This work is based on GLSL Syntax Highlighting for Sublime Text 2 (https://githu
 and GL Shader Validator (https://github.com/WebGLTools/GL-Shader-Validator), released under the Appache v2 
 license. It recognizes files with the extension *.frag;*.vert.
 
+Usage:
 
-
+In the Packages folder, create a folder named 'Shader', and extract the contents of the repository in there.
