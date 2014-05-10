@@ -16,6 +16,21 @@ class GLShaderError:
         self.message = message
 
 
+class GLIntermediateError:
+    """ Represents an intermediate error """
+    errorLine = None
+    errorToken = None
+    errorDescription = None
+    errorLocation = None
+
+    def __init__(self, errorLine, errorToken, errorDescription, errorLocation):
+        self.errorLine = errorLine
+        self.errorToken = errorToken    
+        self.errorDescription = errorDescription
+        self.errorLocation = errorLocation    
+
+
+
 class ANGLECommandLine:
     """ Wrapper for ANGLE CLI """
 
@@ -38,23 +53,30 @@ class ANGLECommandLine:
         self.permissionChecked = True
         return self.permissionChecked
 
-    def validate_contents(self, view):
+    def validate_contents(self, filename, fileLines, content):
         """ Validates the file contents using ANGLE """
         ANGLEPath = self.ANGLEPath[self.platform]
         errors = []
-        fileLines = view.lines(
-            sublime.Region(0, view.size())
-        )
 
-        print "run_validator_process"   
+
+        print "run_validator_process_2"     
+
+        if filename is None:
+            filename = "";
+
         # Create a shell process for essl_to_glsl and pick
         # up its output directly
         ANGLEProcess = subprocess.Popen(
-            ANGLEPath + ' "' + view.file_name() + '"',
+            ANGLEPath + ' "' + filename + '"',
             cwd=sublime.packages_path() + os.sep + self.packagePath + os.sep,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             shell=True)
+
+        if ANGLEProcess.stdin is not None:
+            ANGLEProcess.stdin.write(content);
+            ANGLEProcess.stdin.close();
 
         if ANGLEProcess.stdout is not None:
             errlines = ANGLEProcess.stdout.readlines()
@@ -85,22 +107,10 @@ class ANGLECommandLine:
                         errorDescription = errorDetails.group(3)
                         errorLocation = fileLines[errorLine]
 
-                        # If there is a token try and locate it
-                        if len(errorToken) > 0:
-                            betterLocation = view.find(
-                                errorToken,
-                                errorLocation.begin(),
-                                sublime.LITERAL)
-
-                            # Ensure we have a match before we
-                            # replace the error region
-                            if betterLocation is not None:
-                                errorLocation = betterLocation
-
-                        errors.append(GLShaderError(
-                            errorLocation,
-                            errorDescription
-                        ))
+                        # Record the intermediate error
+                        errors.append(GLIntermediateError( 
+                            errorLine, errorToken, errorDescription, errorLocation
+                        ))                                            
 
         return errors
 
@@ -161,19 +171,6 @@ class GLShaderValidatorCommand(sublime_plugin.EventListener):
         """ Removes any errors """
         view.erase_regions('glshadervalidate_errors')
 
-    def is_glsl_or_essl(self, view):
-        """ Checks that the file is GLSL or ESSL """
-        syntax = view.settings().get('syntax')
-        isShader = False
-        if syntax is not None:
-            isShader = re.search('GLSL|ESSL', syntax, flags=re.IGNORECASE) is not None
-        return isShader
-
-    def is_valid_file_ending(self, view):
-        """ Checks that the file ending will work for ANGLE """
-        isValidFileEnding = re.search('(frag|vert|shader)$', view.file_name()) is not None
-        return isValidFileEnding
-
     def show_errors(self, view):
         """ Passes over the array of errors and adds outlines """
 
@@ -191,66 +188,59 @@ class GLShaderValidatorCommand(sublime_plugin.EventListener):
             sublime.DRAW_OUTLINED
         )
 
+
+    def is_glsl_or_essl(self, view):
+        """ Checks that the file is GLSL or ESSL """
+        syntax = view.settings().get('syntax')
+        isShader = False
+        if syntax is not None:
+            isShader = re.search('GLSL|ESSL', syntax, flags=re.IGNORECASE) is not None
+        return isShader
+
+    def is_valid_file_ending(self, view):
+        """ Checks that the file ending will work for ANGLE """    
+        if view.file_name() is None:
+            return True;
+        isValidFileEnding = re.search('(frag|vert|tess|eval|geo|shader)$', view.file_name()) is not None
+        return isValidFileEnding
+
     def on_selection_modified(self, view):
         """ Shows a status message for an error region """
-
         view.erase_status('glshadervalidator')
-
-        # If we have errors just locate
-        # the first one and go with that for the status
+        # If we have errors just locate the first one and go with that for the status
         if self.is_glsl_or_essl(view) and self.errors is not None:
             for sel in view.sel():
                 for error in self.errors:
                     if error.region.contains(sel):
                         view.set_status('glshadervalidator', error.message)
-                        return
+                        return                        
 
     def on_load(self, view):
         """ File loaded """
-        view.mychanges = False;
-        self.run_validator(view);                    
+        if self.is_glsl_or_essl(view) :
+            view.mychanges = False;
+            self.run_validator(view);                    
 
     def on_activated(self, view):
-        """ File activated """
-        view.mychanges = False;
-        self.run_validator(view);                    
+        """ File activated """           
 
     def on_post_save(self, view):
         """ File saved """    
-        view.mychanges = False;
-        self.run_validator(view);                    
+        if self.is_glsl_or_essl(view) :
+            view.mychanges = False;
+            self.run_validator(view); 
 
-    def on_modified(self, view):
-        """ File saved """
-        view.mychanges = True;
+    def on_modified(self, view):    
+        """ File saved """    
+        if self.is_glsl_or_essl(view) :
+            view.mychanges = True;
+            self.run_validator( view )
 
-    def run_validator_threaded(self, view):
-        """ Runs a validation pass on a seperate thread. """
 
-        # clear the last run
-        view.erase_status('glshadervalidator')
 
-        # set up the settings if necessary
-        self.apply_settings(view)
 
-        # early return if they have disabled the linter
-        if view.settings().get('glsv_enabled') == 0:
-            self.clear_errors(view)
-            return
 
-        # early return for anything not syntax
-        # highlighted as GLSL / ESSL
-        if not self.is_glsl_or_essl(view):
-            return
-
-        # The shader compiler expects files to be suffixed as .frag or
-        # .vert or .shader so we need to do that check here
-        if self.is_valid_file_ending(view):
-            self.clear_errors
-            self.errors = self.ANGLECLI.validate_contents(view)
-            self.show_errors(view)
-        else:
-            view.set_status('glshadervalidator', "File name must end in .frag or .vert or .shader")
+    
 
     def run_validator(self, view):
         exampleThread = ExampleThread(self, view)
@@ -262,13 +252,67 @@ class GLShaderValidatorCommand(sublime_plugin.EventListener):
 class ExampleThread(threading.Thread):
 
     def __init__(self, cmd, edit):
+        cmd.apply_settings(edit);
         threading.Thread.__init__(self)
         self.cmd = cmd
-        self.edit = edit
+        self.edit = edit     
+        self.fileLines = None
+        self.content = None
 
-    def run(self):
+
+        # early return if they have disabled the linter
+        if self.edit.settings().get('glsv_enabled') == 0:
+            self.edit.erase_status('glshadervalidator')
+            self.cmd.clear_errors(self.edit)
+            return
+
+        # early return for anything not syntax highlighted as GLSL / ESSL
+        if not self.cmd.is_glsl_or_essl(self.edit):
+            self.edit.erase_status('glshadervalidator')
+            self.cmd.clear_errors(self.edit);            
+            return        
+        
+        # check for valid file endings.
+        if self.cmd.is_valid_file_ending(self.edit):  
+            self.edit.erase_status('glshadervalidator')
+        else:            
+            self.edit.set_status('glshadervalidator', "File name must end in .frag or .vert or .shader")
+            self.cmd.clear_errors(self.edit);
+            return;
+
+        # Get the file lines and other information to run the thread.
+        self.fileLines = self.edit.lines(sublime.Region(0, self.edit.size()))
+        self.content = self.edit.substr( sublime.Region(0, self.edit.size()))           
+        self.filename = self.edit.file_name();
+        self.errors = [];
+
+    def run(self):        
+        if self.fileLines is None or self.content is None:             
+            sublime.set_timeout(self.callback, 1)
+            return;
+        self.errors = self.cmd.ANGLECLI.validate_contents(self.filename, self.fileLines, self.content);        
         sublime.set_timeout(self.callback, 1)
 
     def callback(self):
         """self.cmd.view.insert(self.edit, 0, "Hello, World!")"""
-        self.cmd.run_validator_threaded(self.edit);
+        
+        # Convert the GLImediateError to GLShaderError, uses heurestics to find the best location for the error result.
+        errors = [];
+        for error in self.errors:            
+            errorLine = error.errorLine;
+            errorToken = error.errorToken;
+            errorDescription = error.errorDescription;
+            errorLocation = error.errorLocation;
+            if len(errorToken) > 0:
+                betterLocation = self.edit.find( errorToken, errorLocation.begin(),  sublime.LITERAL)
+                if betterLocation is not None:
+                    errorLocation = betterLocation
+            errors.append(GLShaderError( errorLocation, errorDescription ))
+
+        # update the error list
+        # self.cmd.clear_errors(self.edit);
+        self.cmd.errors = errors;
+        self.cmd.show_errors(self.edit);
+
+        # invalidate the the status text near the selection.
+        self.cmd.on_selection_modified(self.edit);
